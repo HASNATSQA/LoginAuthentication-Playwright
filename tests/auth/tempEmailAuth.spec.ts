@@ -90,5 +90,5 @@ test('DoctorNow login and 2FA verification', async ({ page }) => {
 
   
   await expect(page).toHaveURL(/dashboard|home|profile/);
-  console.log('🎉 2FA login successful!');
+  console.log('2FA login successful!');
 });
