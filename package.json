@@ -2,7 +2,10 @@
   "name": "temp-auth-poc",
   "version": "1.0.0",
   "main": "index.js",
-  "scripts": {},
+  "scripts": {
+    "codegen": "tsx tests/auth/codegen.ts",
+    "codegen:url": "npx playwright codegen"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -10,7 +13,8 @@
   "devDependencies": {
     "@playwright/test": "^1.56.1",
     "@types/node": "^24.9.2",
-    "playwright": "^1.56.1"
+    "playwright": "^1.56.1",
+    "tsx": "^4.20.6"
   },
   "dependencies": {
     "axios": "^1.13.1",
