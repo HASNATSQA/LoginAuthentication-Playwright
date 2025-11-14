@@ -16,9 +16,20 @@ class MailTmClient {
   private baseUrl = 'https://api.mail.tm';
 
   async login(email: string, password: string) {
-    const res = await axios.post(`${this.baseUrl}/token`, { address: email, password });
-    this.token = res.data.token;
-    this.accountId = res.data.id;
+    try {
+      const res = await axios.post(`${this.baseUrl}/token`, { address: email, password });
+      this.token = res.data.token;
+      this.accountId = res.data.id;
+    } catch (error: any) {
+      if (error.response?.status === 401) {
+        throw new Error(
+          `Mail.tm authentication failed (401 Unauthorized). Please check your MAILTM_EMAIL and MAILTM_PASSWORD in .env file. ` +
+          `Email used: ${email ? email.substring(0, 10) + '...' : 'undefined'}. ` +
+          `Make sure the Mail.tm account exists and credentials are correct.`
+        );
+      }
+      throw error;
+    }
   }
 
   async getMessages() {
@@ -80,7 +91,7 @@ async function waitForNewEmail(mailClient: MailTmClient, previousEmailId?: strin
     const latest = inbox[0];
     
     if (latest && latest.id !== previousEmailId) {
-      console.log('📩 New 2FA email received!');
+      console.log(' New 2FA email received!');
       return latest;
     }
     
@@ -107,12 +118,12 @@ function parseRelativeAgoToTimestamp(agoText: string | null) {
 }
 
 async function waitForOtpSms(page: Page, inboxUrl: string, startAfter: number | null = null, timeoutMs = SAFE_TIMEOUT_MS) {
-  console.log(`📨 Opening SMS inbox: ${inboxUrl}`);
+  console.log(`Opening SMS inbox: ${inboxUrl}`);
   const start = Date.now();
   await page.goto(inboxUrl, { waitUntil: 'domcontentloaded' });
   
   const targetPhoneNumber = '14806855617';
-  console.log(`🔍 Looking for SMS from phone number: ${targetPhoneNumber}`);
+  console.log(`Looking for SMS from phone number: ${targetPhoneNumber}`);
 
   while (Date.now() - start < timeoutMs) {
     const rawCandidates: { text: string; timeText: string | null }[] = await page.evaluate(() => {
@@ -196,29 +207,29 @@ async function waitForOtpSms(page: Page, inboxUrl: string, startAfter: number | 
         const oldest = candidates[0];
         
         if (recentSMS.length > 1) {
-          console.log(`⚠️ Found ${recentSMS.length} SMS from ${targetPhoneNumber} showing "seconds ago". Using the OLDEST one (first sent) to avoid invalid codes.`);
+          console.log(` Found ${recentSMS.length} SMS from ${targetPhoneNumber} showing "seconds ago". Using the OLDEST one (first sent) to avoid invalid codes.`);
         }
         
         const timeTextLower = (oldest.timeText || '').toLowerCase();
         const secondsMatch = timeTextLower.match(/(\d+)\s*(second|sec)/i);
         const secondsAgo = secondsMatch ? parseInt(secondsMatch[1], 10) : null;
         
-        console.log(`✅ Using SMS from ${targetPhoneNumber} (${secondsAgo ? secondsAgo + ' seconds ago' : 'recent'}): otp=${oldest.otp}`);
+        console.log(`Using SMS from ${targetPhoneNumber} (${secondsAgo ? secondsAgo + ' seconds ago' : 'recent'}): otp=${oldest.otp}`);
         return oldest.otp!;
       } else {
         // Found SMS from target number but none show "seconds ago"
         const newest = fromTargetNumber[0];
         const timeTextLower = (newest.timeText || '').toLowerCase();
         if (timeTextLower.match(/(minute|min|hour|hr|day|week|month|year)/i)) {
-          console.log(`⏭️ Found SMS from ${targetPhoneNumber} but it's too old (${newest.timeText}), refreshing for SMS with "seconds ago"...`);
+          console.log(` Found SMS from ${targetPhoneNumber} but it's too old (${newest.timeText}), refreshing for SMS with "seconds ago"...`);
         } else {
-          console.log(`⏭️ Found SMS from ${targetPhoneNumber} but none show "seconds ago", refreshing...`);
+          console.log(` Found SMS from ${targetPhoneNumber} but none show "seconds ago", refreshing...`);
         }
       }
     } else if (withOtp.length > 0) {
-      console.log(`📭 Found ${withOtp.length} SMS OTP(s) but none from ${targetPhoneNumber}, refreshing...`);
+      console.log(`Found ${withOtp.length} SMS OTP(s) but none from ${targetPhoneNumber}, refreshing...`);
     } else {
-      console.log('📭 No SMS OTP found yet (checked inbox rows), refreshing...');
+      console.log('No SMS OTP found yet (checked inbox rows), refreshing...');
     }
 
     await delay(SMS_POLL_INTERVAL_MS);
@@ -252,18 +263,23 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
   const appPage = await context.newPage();
   const smsPage = await context.newPage();
 
-  const DOC_EMAIL = process.env.DOC_EMAIL!;
-  const DOC_PASSWORD = process.env.DOC_PASSWORD!;
-  const MAILTM_EMAIL = process.env.MAILTM_EMAIL!;
-  const MAILTM_PASSWORD = process.env.MAILTM_PASSWORD!;
+  const DOC_EMAIL = process.env.DOC_EMAIL;
+  const DOC_PASSWORD = process.env.DOC_PASSWORD;
+  const MAILTM_EMAIL = process.env.MAILTM_EMAIL;
+  const MAILTM_PASSWORD = process.env.MAILTM_PASSWORD;
   const RECEIVE_SMS_URL = process.env.RECEIVE_SMS_URL || 'https://www.receivesms.co/us-phone-number/21157/';
 
   if (!DOC_EMAIL || !DOC_PASSWORD || !MAILTM_EMAIL || !MAILTM_PASSWORD) {
-    throw new Error('Please add DOC_EMAIL, DOC_PASSWORD, MAILTM_EMAIL, MAILTM_PASSWORD to .env');
+    const missing = [];
+    if (!DOC_EMAIL) missing.push('DOC_EMAIL');
+    if (!DOC_PASSWORD) missing.push('DOC_PASSWORD');
+    if (!MAILTM_EMAIL) missing.push('MAILTM_EMAIL');
+    if (!MAILTM_PASSWORD) missing.push('MAILTM_PASSWORD');
+    throw new Error(`Missing required environment variables in .env file: ${missing.join(', ')}`);
   }
 
   const mailClient = new MailTmClient();
-  await mailClient.login(MAILTM_EMAIL, MAILTM_PASSWORD);
+  await mailClient.login(MAILTM_EMAIL!, MAILTM_PASSWORD!);
 
   // -------- EMAIL FLOW --------
   async function loginUsingEmailFlow() {
@@ -271,8 +287,8 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
 
     await appPage.goto('https://dev-app.doctornow.io/login', { waitUntil: 'domcontentloaded' });
 
-    await appPage.fill('#user-email', DOC_EMAIL);
-    await appPage.fill('#user-password', DOC_PASSWORD);
+    await appPage.fill('#user-email', DOC_EMAIL!);
+    await appPage.fill('#user-password', DOC_PASSWORD!);
 
     // Get inbox BEFORE clicking login - exactly like working script
     const inboxBefore = await mailClient.getMessages();
@@ -298,12 +314,12 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
     await appPage.fill('#auth-password', otpCode);
     await appPage.press('#auth-password', 'Enter');
 
-    console.log('⏳ Waiting 15 seconds for page to fully load after 2FA entry...');
+    console.log('Waiting 15 seconds for page to fully load after 2FA entry...');
     await delay(15000); // Wait 15 seconds as page takes time to load
     
     // Wait for profile menu to be available
     await appPage.waitForSelector('.mat-mdc-menu-trigger.profile_pic, .mat-mdc-menu-trigger, .mat-mdc-button-touch-target', { timeout: 10000 });
-    console.log('✅ Logged in using Email 2FA - Profile menu is now available');
+    console.log('Logged in using Email 2FA - Profile menu is now available');
   }
 
   // -------- PHONE FLOW --------
@@ -311,8 +327,8 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
     console.log('--- PHONE FLOW START ---');
     await appPage.goto('https://dev-app.doctornow.io/login', { waitUntil: 'domcontentloaded' });
 
-    await appPage.fill('#user-email', DOC_EMAIL);
-    await appPage.fill('#user-password', DOC_PASSWORD);
+    await appPage.fill('#user-email', DOC_EMAIL!);
+    await appPage.fill('#user-password', DOC_PASSWORD!);
 
     const clicked = await tryClickAny(appPage, ['.mdc-button__label', 'button[type="submit"]', 'button:has-text("Login")']);
     if (!clicked) await appPage.press('#user-password', 'Enter');
@@ -323,10 +339,10 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
     // Check if OTP input field is already visible (meaning OTP was already sent)
     const otpInputVisible = await appPage.locator('#auth-password').isVisible().catch(() => false);
     if (otpInputVisible) {
-      console.log('✅ OTP input already visible - proceeding directly to fetch SMS...');
+      console.log('OTP input already visible - proceeding directly to fetch SMS...');
     } else {
       // Always explicitly select Phone/SMS to ensure Email is not selected
-      console.log('🔄 Ensuring Phone/SMS option is selected from dropdown...');
+      console.log(' Ensuring Phone/SMS option is selected from dropdown...');
       
       try {
         // Open dropdown using codegen selector - try different names
@@ -337,15 +353,15 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
           // Try with exact name if regex doesn't work
           await appPage.getByRole('combobox', { name: 'Authentication Method Email' }).locator('svg').click();
         }
-        console.log('   ✅ Dropdown opened');
+        console.log('   Dropdown opened');
         await appPage.waitForTimeout(500);
         
         // Select SMS option using codegen selector
         console.log('   → Selecting SMS option...');
         await appPage.getByRole('option', { name: 'SMS' }).click();
-        console.log('   ✅ Selected SMS option');
+        console.log('   Selected SMS option');
       } catch (e) {
-        console.warn('   ⚠️ Codegen selector failed, trying fallback...');
+        console.warn('   Codegen selector failed, trying fallback...');
         // Fallback to old selectors
         const dropdownOpened = await tryClickAny(appPage, [
           'mat-select',
@@ -368,7 +384,7 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
         ]);
         
         if (!phoneOptionClicked) {
-          throw new Error('❌ Failed to select Phone/SMS option from dropdown - cannot proceed');
+          throw new Error('Failed to select Phone/SMS option from dropdown - cannot proceed');
         }
       }
     }
@@ -379,46 +395,46 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
       // Record timestamp BEFORE clicking Send to ensure we only get SMS sent after this moment
       await delay(500);
       const startAfter = Date.now();
-      console.log(`📅 Recorded Send click timestamp: ${startAfter} (will only accept SMS after this)`);
+      console.log(`Recorded Send click timestamp: ${startAfter} (will only accept SMS after this)`);
       
       // Click Send button
       await tryClickAny(appPage, ['button:has-text("Send")', 'button:has-text("Send OTP")', 'button:has-text("Continue")', '.mdc-button__label']);
       
       // Wait a few seconds for the SMS to be sent and arrive (to avoid getting old duplicate SMS)
-      console.log('⏳ Waiting 5 seconds for SMS to be sent and arrive...');
+      console.log('Waiting 5 seconds for SMS to be sent and arrive...');
       await delay(5000);
       
       const otp = await waitForOtpSms(smsPage, RECEIVE_SMS_URL, startAfter, SAFE_TIMEOUT_MS);
-      console.log('🔢 SMS OTP found =', otp);
+      console.log('SMS OTP found =', otp);
 
       await appPage.fill('#auth-password', otp);
       await appPage.press('#auth-password', 'Enter');
     } else {
       console.log('OTP already sent, proceeding to fetch SMS...');
       const otp = await waitForOtpSms(smsPage, RECEIVE_SMS_URL, null, SAFE_TIMEOUT_MS);
-      console.log('🔢 SMS OTP found =', otp);
+      console.log('SMS OTP found =', otp);
       
       await appPage.fill('#auth-password', otp);
       await appPage.press('#auth-password', 'Enter');
     }
 
-    console.log('⏳ Waiting 15 seconds for page to fully load after 2FA entry...');
-    await delay(15000); // Wait 15 seconds as page takes time to load
+    console.log('Waiting 10 seconds for page to fully load after 2FA entry...');
+    await delay(10000); // Wait 15 seconds as page takes time to load
     
     // Wait for profile menu to be available
     await appPage.waitForSelector('.mat-mdc-menu-trigger.profile_pic, .mat-mdc-menu-trigger, .mat-mdc-button-touch-target', { timeout: 10000 });
-    console.log('✅ Logged in using Phone 2FA - Profile menu is now available');
+    console.log('Logged in using Phone 2FA - Profile menu is now available');
   }
 
   // -------- Logout helper --------
   async function logoutFromProfile() {
-    console.log('🚪 Logging out...');
+    console.log('Logging out...');
     try {
       // Wait for the page to be ready
       await appPage.waitForTimeout(1000);
       
       // Wait for profile menu button to be available with multiple strategies
-      console.log('🔍 Looking for profile menu button...');
+      console.log('Looking for profile menu button...');
       
       let menuOpened = false;
       
@@ -429,9 +445,9 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
         await profileButton.waitFor({ state: 'visible', timeout: 5000 });
         await profileButton.click();
         menuOpened = true;
-        console.log('✅ Opened profile menu using role selector (exact name)');
+        console.log('Opened profile menu using role selector (exact name)');
       } catch (e) {
-        console.log('⚠️ Role selector with exact name failed, trying flexible match...');
+        console.log('Role selector with exact name failed, trying flexible match...');
         
         // Strategy 2: Try role-based selector with partial/flexible name match
         try {
@@ -442,7 +458,7 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
             await welcomeButton.waitFor({ state: 'visible', timeout: 5000 });
             await welcomeButton.click();
             menuOpened = true;
-            console.log('✅ Opened profile menu using role selector (partial match "Welcome")');
+            console.log('Opened profile menu using role selector (partial match "Welcome")');
           } catch {
             // If that fails, search through all buttons
             const buttons = appPage.locator('button');
@@ -458,7 +474,7 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
                   await button.scrollIntoViewIfNeeded();
                   await button.click();
                   menuOpened = true;
-                  console.log(`✅ Opened profile menu using button with text: "${text.trim()}"`);
+                  console.log(`Opened profile menu using button with text: "${text.trim()}"`);
                   break;
                 }
               } catch (e) {
@@ -467,7 +483,7 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
             }
           }
         } catch (e2) {
-          console.log('⚠️ Flexible role selector failed, trying class selectors...');
+          console.log('Flexible role selector failed, trying class selectors...');
         }
       }
       
@@ -482,7 +498,7 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
           'button:has-text("Welcome")'
         ]);
         if (menuOpened) {
-          console.log('✅ Opened profile menu using class selectors');
+          console.log('Opened profile menu using class selectors');
         }
       }
       
@@ -494,7 +510,7 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
       await appPage.waitForTimeout(500);
       
       // Click logout menu item
-      console.log('🔍 Looking for logout menu item...');
+      console.log(' Looking for logout menu item...');
       let logoutClicked = false;
       
       // Strategy 1: Try role-based selector
@@ -503,9 +519,9 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
         await logoutItem.waitFor({ state: 'visible', timeout: 3000 });
         await logoutItem.click();
         logoutClicked = true;
-        console.log('✅ Clicked logout using role selector');
+        console.log('Clicked logout using role selector');
       } catch (e) {
-        console.log('⚠️ Role selector for logout failed, trying text-based...');
+        console.log('Role selector for logout failed, trying text-based...');
         
         // Strategy 2: Try text-based selectors
         logoutClicked = await tryClickAny(appPage, [
@@ -519,7 +535,7 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
         ]);
         
         if (logoutClicked) {
-          console.log('✅ Clicked logout using text-based selector');
+          console.log('Clicked logout using text-based selector');
         }
       }
       
@@ -529,9 +545,9 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
       
       // Wait for redirect to login page
       await appPage.waitForURL(/login/, { timeout: 15000 });
-      console.log('✅ Logged out successfully');
+      console.log('Logged out successfully');
     } catch (err) {
-      console.error('❌ Error during logout:', err);
+      console.error('Error during logout:', err);
       throw err;
     }
   }
@@ -546,7 +562,7 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
 
     console.log('🎉 Both flows completed successfully');
   } catch (err) {
-    console.error('❌ Test failed:', err);
+    console.error('Test failed:', err);
     try { await appPage.screenshot({ path: 'failure-app.png' }); } catch {}
     try { await smsPage.screenshot({ path: 'failure-sms.png' }); } catch {}
     throw err;
