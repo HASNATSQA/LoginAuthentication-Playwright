@@ -369,7 +369,8 @@ async function waitForNewSms(smsClient: ReceiveSmsApiClient, previousSmsId?: str
         const from = msg.from || msg.sender || msg.phoneNumber || msg.number || 'unknown';
         const text = (msg.text || msg.body || msg.message || msg.content || '').substring(0, 50);
         const ts = getMessageTimestamp(msg);
-        console.log(`  Message ${idx + 1}: from=${from}, timestamp=${ts}, text="${text}..."`);
+        const ageSeconds = ts ? Math.floor((Date.now() - ts) / 1000) : null;
+        console.log(`  Message ${idx + 1}: from=${from}, timestamp=${ts}, age=${ageSeconds}s, text="${text}..."`);
       });
     }
     
@@ -400,7 +401,11 @@ async function waitForNewSms(smsClient: ReceiveSmsApiClient, previousSmsId?: str
     
     console.log(`🔍 Filtered to ${filteredMessages.length} message(s) from sender ${smsClient.senderPhoneNumber}`);
     
-    // Find the latest message with OTP that is newer than what we've seen
+    // Find the latest message with OTP that is within the acceptable time window (1-30 seconds ago)
+    const now = Date.now();
+    const MIN_AGE_MS = 1000; // 1 second
+    const MAX_AGE_MS = 30000; // 30 seconds
+    
     for (const msg of filteredMessages) {
       const msgId = msg.id || msg.messageId || msg._id || JSON.stringify(msg);
       const msgTimestamp = getMessageTimestamp(msg);
@@ -421,6 +426,22 @@ async function waitForNewSms(smsClient: ReceiveSmsApiClient, previousSmsId?: str
         continue;
       }
       
+      // Check if message is within acceptable time window (1-30 seconds ago)
+      if (msgTimestamp) {
+        const ageMs = now - msgTimestamp;
+        const ageSeconds = Math.floor(ageMs / 1000);
+        
+        if (ageMs < MIN_AGE_MS) {
+          // Message is too new (less than 1 second old) - might be still processing, continue polling
+          console.log(`⏳ Message is too new (${ageSeconds}s old), waiting for it to stabilize...`);
+          continue;
+        } else if (ageMs > MAX_AGE_MS) {
+          // Message is too old (more than 30 seconds old) - skip and continue polling for newer one
+          console.log(`⏭️ Message is too old (${ageSeconds}s old), continuing to check for newer messages...`);
+          continue;
+        }
+      }
+      
       // Extract OTP from message
       // First try the code field (extracted from HTML)
       let otp = msg.code || null;
@@ -438,44 +459,55 @@ async function waitForNewSms(smsClient: ReceiveSmsApiClient, previousSmsId?: str
           latestMessageSeen = msg;
         }
         
-        // If this is the absolute latest message (first in sorted list), return it immediately
-        // Otherwise, continue polling to see if an even newer one arrives
+        // If this is the absolute latest message (first in sorted list) and within time window, return it
         const isLatestMessage = filteredMessages.indexOf(msg) === 0;
         
-        if (isLatestMessage) {
+        if (isLatestMessage && msgTimestamp) {
+          const ageSeconds = Math.floor((now - msgTimestamp) / 1000);
           const fromNumber = msg.from || msg.sender || msg.phoneNumber || msg.number || 'unknown';
-          console.log(`✅ Latest 2FA SMS received! From: ${fromNumber}, OTP: ${otp}, Timestamp: ${msgTimestamp}`);
           
-          // Wait a bit more to ensure no newer message arrives
-          await delay(2000);
-          
-          // Check one more time for an even newer message
-          const finalCheck = await smsClient.getMessages();
-          const finalSorted = finalCheck.sort((a: any, b: any) => {
-            const tsA = getMessageTimestamp(a);
-            const tsB = getMessageTimestamp(b);
-            if (tsA && tsB) return tsB - tsA;
-            return 0;
-          });
-          
-          const finalFiltered = finalSorted.filter((m: any) => {
-            const fromNum = (m.from || m.sender || m.phoneNumber || m.number || '').replace(/\D/g, '');
-            return fromNum.includes(senderPhone) || senderPhone.includes(fromNum);
-          });
-          
-          if (finalFiltered.length > 0) {
-            const newestFinal = finalFiltered[0];
-            const newestTs = getMessageTimestamp(newestFinal);
-            const newestOtp = newestFinal.code || extract6DigitOtpFromText(newestFinal.text || newestFinal.body || newestFinal.message || newestFinal.content || '');
+          // Double-check it's still within the acceptable window
+          if (ageSeconds >= 1 && ageSeconds <= 30) {
+            console.log(`✅ Latest 2FA SMS received! From: ${fromNumber}, OTP: ${otp}, Age: ${ageSeconds}s`);
             
-            // If there's a newer message with OTP, use that instead
-            if (newestTs && msgTimestamp && newestTs > msgTimestamp && newestOtp) {
-              console.log(`🔄 Found even newer message! Using OTP: ${newestOtp}`);
-              return { id: newestFinal.id || JSON.stringify(newestFinal), otp: newestOtp, message: newestFinal };
+            // Wait a bit more to ensure no newer message arrives
+            await delay(2000);
+            
+            // Check one more time for an even newer message
+            const finalCheck = await smsClient.getMessages();
+            const finalSorted = finalCheck.sort((a: any, b: any) => {
+              const tsA = getMessageTimestamp(a);
+              const tsB = getMessageTimestamp(b);
+              if (tsA && tsB) return tsB - tsA;
+              return 0;
+            });
+            
+            const finalFiltered = finalSorted.filter((m: any) => {
+              const fromNum = (m.from || m.sender || m.phoneNumber || m.number || '').replace(/\D/g, '');
+              return fromNum.includes(senderPhone) || senderPhone.includes(fromNum);
+            });
+            
+            if (finalFiltered.length > 0) {
+              const newestFinal = finalFiltered[0];
+              const newestTs = getMessageTimestamp(newestFinal);
+              const newestOtp = newestFinal.code || extract6DigitOtpFromText(newestFinal.text || newestFinal.body || newestFinal.message || newestFinal.content || '');
+              
+              // If there's a newer message with OTP within the time window, use that instead
+              if (newestTs && msgTimestamp && newestTs > msgTimestamp && newestOtp) {
+                const newestAgeSeconds = Math.floor((Date.now() - newestTs) / 1000);
+                if (newestAgeSeconds >= 1 && newestAgeSeconds <= 30) {
+                  console.log(`🔄 Found even newer message! Using OTP: ${newestOtp}, Age: ${newestAgeSeconds}s`);
+                  return { id: newestFinal.id || JSON.stringify(newestFinal), otp: newestOtp, message: newestFinal };
+                }
+              }
             }
+            
+            return { id: msgId, otp, message: msg };
+          } else {
+            // Message is outside the window, continue polling
+            console.log(`⏭️ Latest message is outside time window (${ageSeconds}s), continuing to check...`);
+            continue;
           }
-          
-          return { id: msgId, otp, message: msg };
         }
       } else {
         // Log if we found a message but no OTP
@@ -492,10 +524,11 @@ async function waitForNewSms(smsClient: ReceiveSmsApiClient, previousSmsId?: str
       if (latestTs && (!latestTimestampSeen || latestTs > latestTimestampSeen)) {
         latestTimestampSeen = latestTs;
         latestMessageSeen = latestMsg;
-        console.log(`📊 Latest message timestamp seen: ${latestTs} (${new Date(latestTs).toISOString()})`);
+        const ageSeconds = Math.floor((Date.now() - latestTs) / 1000);
+        console.log(`📊 Latest message timestamp seen: ${latestTs} (${new Date(latestTs).toISOString()}, ${ageSeconds}s ago)`);
       }
       
-      console.log(`Found ${filteredMessages.length} message(s) from sender, continuing to check for newer ones...`);
+      console.log(`Found ${filteredMessages.length} message(s) from sender, continuing to check for newer ones within 1-30s window...`);
     } else {
       console.log(`No messages from ${smsClient.senderPhoneNumber} yet, continuing...`);
     }
@@ -503,16 +536,24 @@ async function waitForNewSms(smsClient: ReceiveSmsApiClient, previousSmsId?: str
     await delay(SMS_POLL_INTERVAL_MS);
   }
   
-  // If we have a latest message seen but didn't return, try to return it
+  // If we have a latest message seen but didn't return, check if it's within the time window
   if (latestMessageSeen) {
-    const otp = latestMessageSeen.code || extract6DigitOtpFromText(latestMessageSeen.text || latestMessageSeen.body || latestMessageSeen.message || latestMessageSeen.content || '');
-    if (otp) {
-      console.log(`⚠️ Timeout reached, using latest message found. OTP: ${otp}`);
-      return { id: latestMessageSeen.id || JSON.stringify(latestMessageSeen), otp, message: latestMessageSeen };
+    const msgTimestamp = getMessageTimestamp(latestMessageSeen);
+    if (msgTimestamp) {
+      const ageSeconds = Math.floor((Date.now() - msgTimestamp) / 1000);
+      if (ageSeconds >= 1 && ageSeconds <= 30) {
+        const otp = latestMessageSeen.code || extract6DigitOtpFromText(latestMessageSeen.text || latestMessageSeen.body || latestMessageSeen.message || latestMessageSeen.content || '');
+        if (otp) {
+          console.log(`⚠️ Timeout reached, using latest message found within time window. OTP: ${otp}, Age: ${ageSeconds}s`);
+          return { id: latestMessageSeen.id || JSON.stringify(latestMessageSeen), otp, message: latestMessageSeen };
+        }
+      } else {
+        console.log(`⚠️ Timeout reached, but latest message is outside time window (${ageSeconds}s old)`);
+      }
     }
   }
   
-  throw new Error(`No new 2FA SMS from ${smsClient.senderPhoneNumber} arrived within timeout period.`);
+  throw new Error(`No new 2FA SMS from ${smsClient.senderPhoneNumber} arrived within timeout period (or none found within 1-30 second window).`);
 }
 
 /* -------------------- Robust click helper -------------------- */
@@ -594,8 +635,8 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
     await appPage.fill('#auth-password', otpCode);
     await appPage.press('#auth-password', 'Enter');
 
-    console.log('Waiting 15 seconds for page to fully load after 2FA entry...');
-    await delay(15000); // Wait 15 seconds as page takes time to load
+    console.log('Waiting 7 seconds for page to fully load after 2FA entry...');
+    await delay(7000); // Wait 7 seconds as page takes time to load
     
     // Wait for profile menu to be available
     await appPage.waitForSelector('.mat-mdc-menu-trigger.profile_pic, .mat-mdc-menu-trigger, .mat-mdc-button-touch-target', { timeout: 10000 });
