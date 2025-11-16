@@ -53,6 +53,235 @@ class MailTmClient {
 
 }
 
+/* -------------------- SMS API client (receivesms.co) -------------------- */
+class ReceiveSmsApiClient {
+  private apiUrl: string;
+  public senderPhoneNumber: string;
+
+  constructor(receiveSmsUrl: string, senderPhoneNumber: string) {
+    // Extract API endpoint from receivesms.co URL
+    // URL format: https://www.receivesms.co/us-phone-number/21157/
+    this.apiUrl = receiveSmsUrl.replace(/\/$/, ''); // Remove trailing slash
+    this.senderPhoneNumber = senderPhoneNumber;
+  }
+
+  private parseMessagesFromHtml(html: string): any[] {
+    const messages: any[] = [];
+    
+    // Match article elements with entry-card class
+    // Structure: <article class="entry-card type--default">...</article>
+    const articleRegex = /<article[^>]*class="[^"]*entry-card[^"]*"[^>]*>(.*?)<\/article>/gs;
+    let articleMatch;
+    
+    while ((articleMatch = articleRegex.exec(html)) !== null) {
+      const articleHtml = articleMatch[1];
+      
+      // Extract sender phone number from: <a href="/who-called-me/13345649589/" class="from-link">13345649589</a>
+      const fromMatch = articleHtml.match(/<a[^>]*href="[^"]*who-called-me\/(\d+)[^"]*"[^>]*class="[^"]*from-link[^"]*"[^>]*>(\d+)<\/a>/);
+      const fromNumber = fromMatch ? (fromMatch[2] || fromMatch[1]) : '';
+      
+      // Extract code from: <span class="chip" data-code="738528"> or <strong class="code" data-code="738528">738528</strong>
+      const codeMatch = articleHtml.match(/<strong[^>]*class="[^"]*code[^"]*"[^>]*data-code="(\d+)"[^>]*>(\d+)<\/strong>/) ||
+                       articleHtml.match(/<span[^>]*class="[^"]*chip[^"]*"[^>]*data-code="(\d+)"[^>]*>/);
+      const code = codeMatch ? (codeMatch[2] || codeMatch[1]) : '';
+      
+      // Extract message text from: <div class="sms">...</div>
+      const smsMatch = articleHtml.match(/<div[^>]*class="[^"]*sms[^"]*"[^>]*>(.*?)<\/div>/s);
+      const messageText = smsMatch ? smsMatch[1].replace(/&#039;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim() : '';
+      
+      // Extract time from: <span class="muted">39 seconds ago</span>
+      const timeMatch = articleHtml.match(/<span[^>]*class="[^"]*muted[^"]*"[^>]*>([^<]+)<\/span>/);
+      const timeText = timeMatch ? timeMatch[1].trim() : '';
+      
+      // Parse relative time to timestamp
+      const timestamp = this.parseRelativeTime(timeText);
+      
+      if (fromNumber || messageText) {
+        messages.push({
+          from: fromNumber,
+          sender: fromNumber,
+          phoneNumber: fromNumber,
+          number: fromNumber,
+          text: messageText,
+          body: messageText,
+          message: messageText,
+          content: messageText,
+          code: code,
+          timeText: timeText,
+          timestamp: timestamp,
+          receivedAt: timestamp ? new Date(timestamp).toISOString() : null,
+          id: `${fromNumber}-${timestamp || Date.now()}-${Math.random()}`,
+        });
+      }
+    }
+    
+    return messages;
+  }
+
+  private parseRelativeTime(timeText: string): number | null {
+    if (!timeText) return null;
+    
+    const now = Date.now();
+    const text = timeText.toLowerCase().trim();
+    
+    // Parse patterns like "39 seconds ago", "8 minutes ago", "1 hour ago", "1 day ago"
+    const secondMatch = text.match(/(\d+)\s*(?:second|sec)s?\s*ago/);
+    if (secondMatch) {
+      return now - parseInt(secondMatch[1]) * 1000;
+    }
+    
+    const minuteMatch = text.match(/(\d+)\s*(?:minute|min)s?\s*ago/);
+    if (minuteMatch) {
+      return now - parseInt(minuteMatch[1]) * 60 * 1000;
+    }
+    
+    const hourMatch = text.match(/(\d+)\s*(?:hour|hr)s?\s*ago/);
+    if (hourMatch) {
+      return now - parseInt(hourMatch[1]) * 60 * 60 * 1000;
+    }
+    
+    const dayMatch = text.match(/(\d+)\s*(?:day|days?)\s*ago/);
+    if (dayMatch) {
+      return now - parseInt(dayMatch[1]) * 24 * 60 * 60 * 1000;
+    }
+    
+    return null;
+  }
+
+  async getMessages() {
+    try {
+      // Extract phone number ID from URL (e.g., 21314 from /us-phone-number/21314/)
+      const phoneId = this.apiUrl.split('/').pop() || this.apiUrl.split('/').slice(-2)[0];
+      
+      // The API endpoint is likely the same URL but returns JSON
+      // Based on network tab showing "21314/", try various API patterns
+      const apiEndpoints = [
+        `${this.apiUrl}/`,  // Same URL with trailing slash (as mentioned: "21314/")
+        this.apiUrl,        // Same URL without trailing slash
+        `https://www.receivesms.co/api/${phoneId}/`,  // Direct API path with phone ID
+        `https://www.receivesms.co/api/${phoneId}`,   // Direct API path without trailing slash
+        `https://www.receivesms.co/us-phone-number/${phoneId}/`,  // Reconstruct with phone ID
+        `https://www.receivesms.co/us-phone-number/${phoneId}`,    // Without trailing slash
+        `${this.apiUrl}/api`,
+        `https://www.receivesms.co/api/us-phone-number/${phoneId}`,
+        `https://www.receivesms.co/api/us-phone-number/${phoneId}/`,
+      ];
+
+      for (const endpoint of apiEndpoints) {
+        try {
+          // Try with JSON accept header first
+          const res = await axios.get(endpoint, {
+            headers: {
+              'Accept': 'application/json, text/plain, */*',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'Referer': 'https://www.receivesms.co/'
+            },
+            timeout: 10000
+          });
+          
+          // Check if response is JSON
+          const contentType = res.headers['content-type'] || '';
+          const isJson = contentType.includes('application/json') || 
+                        typeof res.data === 'object' && !Array.isArray(res.data) && res.data !== null;
+          
+          // Handle different API response formats
+          let messages: any[] = [];
+          
+          if (isJson) {
+            // Direct JSON response
+            // Log the structure for debugging
+            if (endpoint === `${this.apiUrl}/` || endpoint === this.apiUrl) {
+              console.log(`📡 API Response structure from ${endpoint}:`, Object.keys(res.data));
+            }
+            
+            if (Array.isArray(res.data)) {
+              messages = res.data;
+            } else if (res.data.messages) {
+              messages = res.data.messages;
+            } else if (res.data['hydra:member']) {
+              messages = res.data['hydra:member'];
+            } else if (res.data.data) {
+              messages = Array.isArray(res.data.data) ? res.data.data : [];
+            } else if (res.data.sms) {
+              messages = Array.isArray(res.data.sms) ? res.data.sms : [];
+            } else if (res.data.items) {
+              messages = Array.isArray(res.data.items) ? res.data.items : [];
+            } else if (res.data.results) {
+              messages = Array.isArray(res.data.results) ? res.data.results : [];
+            } else {
+              // If we got JSON but don't recognize the structure, log it
+              console.log(`⚠️ Unknown JSON structure. Keys: ${Object.keys(res.data).join(', ')}`);
+              // Try to find any array in the response
+              for (const key in res.data) {
+                if (Array.isArray(res.data[key])) {
+                  messages = res.data[key];
+                  console.log(`📦 Found array in key: ${key}`);
+                  break;
+                }
+              }
+            }
+            
+            if (messages.length > 0) {
+              console.log(`✅ Successfully fetched ${messages.length} messages from API endpoint: ${endpoint}`);
+              return messages;
+            } else if (isJson && Object.keys(res.data).length > 0) {
+              // Log sample of what we got for debugging
+              console.log(`⚠️ Got JSON response but no messages array. Sample:`, JSON.stringify(res.data).substring(0, 200));
+            }
+          } else {
+            // HTML response - parse messages from HTML structure
+            const html = res.data;
+            const messages = this.parseMessagesFromHtml(html);
+            
+            if (messages.length > 0) {
+              console.log(`✅ Successfully parsed ${messages.length} messages from HTML at: ${endpoint}`);
+              return messages;
+            }
+            
+            // Fallback: try to extract JSON from script tags
+            const jsonPatterns = [
+              /var\s+messages\s*=\s*(\[.*?\]);/s,
+              /window\.messages\s*=\s*(\[.*?\]);/s,
+              /const\s+messages\s*=\s*(\[.*?\]);/s,
+              /let\s+messages\s*=\s*(\[.*?\]);/s,
+              /"messages"\s*:\s*(\[.*?\])/s,
+              /data-messages=['"](.*?)['"]/s,
+              /messages:\s*(\[.*?\])/s,
+            ];
+            
+            for (const pattern of jsonPatterns) {
+              const jsonMatch = html.match(pattern);
+              if (jsonMatch) {
+                try {
+                  const parsed = JSON.parse(jsonMatch[1]);
+                  if (Array.isArray(parsed) && parsed.length > 0) {
+                    console.log(`✅ Successfully parsed ${parsed.length} messages from JSON in HTML at: ${endpoint}`);
+                    return parsed;
+                  }
+                } catch (e) {
+                  continue;
+                }
+              }
+            }
+          }
+        } catch (err: any) {
+          // Log error but continue to next endpoint
+          if (err.response?.status !== 404) {
+            console.log(`⚠️ Endpoint ${endpoint} failed: ${err.message}`);
+          }
+          continue;
+        }
+      }
+      
+      console.warn(`⚠️ No messages found from ${this.apiUrl} - tried ${apiEndpoints.length} endpoints`);
+      return [];
+    } catch (error: any) {
+      console.warn(`Error fetching SMS messages from ${this.apiUrl}:`, error.message);
+      return [];
+    }
+  }
+}
+
 /* -------------------- Utilities -------------------- */
 function delay(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -71,9 +300,17 @@ function extract6DigitOtpFromText(text: string | null) {
 }
 
 function getMessageTimestamp(msg: any): number | null {
-  const candidates = ['createdAt', 'updatedAt', '@timestamp', 'date', 'receivedAt', 'sentAt', 'timestamp'];
+  // First check if timestamp is already a number
+  if (typeof msg.timestamp === 'number') {
+    return msg.timestamp;
+  }
+  
+  const candidates = ['timestamp', 'createdAt', 'updatedAt', '@timestamp', 'date', 'receivedAt', 'sentAt'];
   for (const c of candidates) {
     if (msg[c]) {
+      if (typeof msg[c] === 'number') {
+        return msg[c];
+      }
       const ts = Date.parse(msg[c]);
       if (!Number.isNaN(ts)) return ts;
     }
@@ -101,142 +338,181 @@ async function waitForNewEmail(mailClient: MailTmClient, previousEmailId?: strin
   throw new Error('No new 2FA email arrived within 30 seconds.');
 }
 
-/* -------------------- SMS wait & extraction (ReceiveSMS scraping) -------------------- */
-function parseRelativeAgoToTimestamp(agoText: string | null) {
-  if (!agoText) return null;
-  const t = agoText.trim().toLowerCase();
-  const m = t.match(/(\d+)\s*(second|sec|minute|min|hour|hr|day)/i);
-  if (!m) return null;
-  const n = parseInt(m[1], 10);
-  const unit = m[2].toLowerCase();
-  const now = Date.now();
-  if (unit.startsWith('sec')) return now - n * 1000;
-  if (unit.startsWith('min')) return now - n * 60_000;
-  if (unit.startsWith('hour') || unit === 'hr') return now - n * 60 * 60_000;
-  if (unit.startsWith('day')) return now - n * 24 * 60 * 60_000;
-  return null;
-}
-
-async function waitForOtpSms(page: Page, inboxUrl: string, startAfter: number | null = null, timeoutMs = SAFE_TIMEOUT_MS) {
-  console.log(`Opening SMS inbox: ${inboxUrl}`);
-  const start = Date.now();
-  await page.goto(inboxUrl, { waitUntil: 'domcontentloaded' });
+/* -------------------- SMS wait & extraction (API-based) -------------------- */
+async function waitForNewSms(smsClient: ReceiveSmsApiClient, previousSmsId?: string, startAfter: number | null = null) {
+  console.log(`⏳ Waiting for new 2FA SMS from ${smsClient.senderPhoneNumber}...`);
   
-  const targetPhoneNumber = '14806855617';
-  console.log(`Looking for SMS from phone number: ${targetPhoneNumber}`);
-
-  while (Date.now() - start < timeoutMs) {
-    const rawCandidates: { text: string; timeText: string | null }[] = await page.evaluate(() => {
-      const selectors = [
-        '.sms-table tbody tr',
-        '.table tbody tr',
-        '.messages .message',
-        '.inbox .message',
-        '.sms-list .sms',
-        '#messages .msg',
-        '.message-row',
-        '.list-group-item',
-      ];
-      let rows: HTMLElement[] = [];
-      for (const s of selectors) {
-        const els = Array.from(document.querySelectorAll<HTMLElement>(s));
-        if (els.length) {
-          rows = els;
-          break;
+  const start = Date.now();
+  const timeoutMs = SAFE_TIMEOUT_MS;
+  
+  // Track the latest timestamp we've seen so far
+  let latestTimestampSeen: number | null = startAfter || null;
+  let latestMessageSeen: any = null;
+  
+  // Try polling for new SMS (similar to email flow)
+  for (let i = 0; i < Math.ceil(timeoutMs / SMS_POLL_INTERVAL_MS); i++) {
+    // Fetch fresh messages (this will refresh the page)
+    const messages = await smsClient.getMessages();
+    
+    if (messages.length === 0) {
+      console.log(`No messages found (attempt ${i + 1}), continuing...`);
+      await delay(SMS_POLL_INTERVAL_MS);
+      continue;
+    }
+    
+    console.log(`📨 Fetched ${messages.length} total message(s) (attempt ${i + 1})`);
+    
+    // Log first few messages for debugging (only on first attempt)
+    if (i === 0 && messages.length > 0) {
+      console.log('Sample messages structure:');
+      messages.slice(0, 3).forEach((msg: any, idx: number) => {
+        const from = msg.from || msg.sender || msg.phoneNumber || msg.number || 'unknown';
+        const text = (msg.text || msg.body || msg.message || msg.content || '').substring(0, 50);
+        const ts = getMessageTimestamp(msg);
+        console.log(`  Message ${idx + 1}: from=${from}, timestamp=${ts}, text="${text}..."`);
+      });
+    }
+    
+    // Sort messages by timestamp (newest first)
+    const sortedMessages = messages.sort((a: any, b: any) => {
+      const tsA = getMessageTimestamp(a);
+      const tsB = getMessageTimestamp(b);
+      if (tsA && tsB) return tsB - tsA; // newest first
+      if (tsA) return -1; // a has timestamp, b doesn't - a is newer
+      if (tsB) return 1;  // b has timestamp, a doesn't - b is newer
+      return 0; // neither has timestamp
+    });
+    
+    // Filter for messages from the sender phone number
+    const senderPhone = smsClient.senderPhoneNumber.replace(/\D/g, ''); // Remove non-digits
+    const filteredMessages = sortedMessages.filter((msg: any) => {
+      const fromNumber = (msg.from || msg.sender || msg.phoneNumber || msg.number || '').replace(/\D/g, '');
+      const messageText = (msg.text || msg.body || msg.message || msg.content || '').toLowerCase();
+      
+      // Check if message is from sender phone number
+      const fromSender = fromNumber.includes(senderPhone) || senderPhone.includes(fromNumber);
+      
+      // Also check if message contains DoctorNow/DN keywords (optional)
+      const hasDoctorNow = messageText.includes('doctornow') || messageText.includes('dn');
+      
+      return fromSender || hasDoctorNow;
+    });
+    
+    console.log(`🔍 Filtered to ${filteredMessages.length} message(s) from sender ${smsClient.senderPhoneNumber}`);
+    
+    // Find the latest message with OTP that is newer than what we've seen
+    for (const msg of filteredMessages) {
+      const msgId = msg.id || msg.messageId || msg._id || JSON.stringify(msg);
+      const msgTimestamp = getMessageTimestamp(msg);
+      
+      // Skip if this is the previous message (by ID)
+      if (previousSmsId && msgId === previousSmsId) {
+        continue;
+      }
+      
+      // If startAfter is provided, only accept messages after that timestamp
+      if (startAfter && msgTimestamp && msgTimestamp < startAfter) {
+        continue;
+      }
+      
+      // Only accept messages that are newer than the latest we've seen
+      if (latestTimestampSeen && msgTimestamp && msgTimestamp <= latestTimestampSeen) {
+        // This message is not newer, skip it
+        continue;
+      }
+      
+      // Extract OTP from message
+      // First try the code field (extracted from HTML)
+      let otp = msg.code || null;
+      
+      // If no code field, extract from message text
+      if (!otp) {
+        const messageText = msg.text || msg.body || msg.message || msg.content || '';
+        otp = extract6DigitOtpFromText(messageText);
+      }
+      
+      if (otp) {
+        // Update latest seen timestamp
+        if (msgTimestamp && (!latestTimestampSeen || msgTimestamp > latestTimestampSeen)) {
+          latestTimestampSeen = msgTimestamp;
+          latestMessageSeen = msg;
         }
-      }
-      if (rows.length === 0) {
-        const main = document.querySelector<HTMLElement>('main, #main, #container, body');
-        if (main) rows = [main];
-      }
-
-      const out: { text: string; timeText: string | null }[] = [];
-      for (const r of rows) {
-        const text = r.innerText || '';
-        let timeText: string | null = null;
-        const timeSelectors = ['.time', '.date', '.ago', '.time-ago', 'td.time', '.sms-time', '.message__time', '.text-muted'];
-        for (const ts of timeSelectors) {
-          const el = r.querySelector(ts);
-          if (el && el.textContent) {
-            const t = el.textContent.trim();
-            if (t.length < 100) {
-              timeText = t;
-              break;
+        
+        // If this is the absolute latest message (first in sorted list), return it immediately
+        // Otherwise, continue polling to see if an even newer one arrives
+        const isLatestMessage = filteredMessages.indexOf(msg) === 0;
+        
+        if (isLatestMessage) {
+          const fromNumber = msg.from || msg.sender || msg.phoneNumber || msg.number || 'unknown';
+          console.log(`✅ Latest 2FA SMS received! From: ${fromNumber}, OTP: ${otp}, Timestamp: ${msgTimestamp}`);
+          
+          // Wait a bit more to ensure no newer message arrives
+          await delay(2000);
+          
+          // Check one more time for an even newer message
+          const finalCheck = await smsClient.getMessages();
+          const finalSorted = finalCheck.sort((a: any, b: any) => {
+            const tsA = getMessageTimestamp(a);
+            const tsB = getMessageTimestamp(b);
+            if (tsA && tsB) return tsB - tsA;
+            return 0;
+          });
+          
+          const finalFiltered = finalSorted.filter((m: any) => {
+            const fromNum = (m.from || m.sender || m.phoneNumber || m.number || '').replace(/\D/g, '');
+            return fromNum.includes(senderPhone) || senderPhone.includes(fromNum);
+          });
+          
+          if (finalFiltered.length > 0) {
+            const newestFinal = finalFiltered[0];
+            const newestTs = getMessageTimestamp(newestFinal);
+            const newestOtp = newestFinal.code || extract6DigitOtpFromText(newestFinal.text || newestFinal.body || newestFinal.message || newestFinal.content || '');
+            
+            // If there's a newer message with OTP, use that instead
+            if (newestTs && msgTimestamp && newestTs > msgTimestamp && newestOtp) {
+              console.log(`🔄 Found even newer message! Using OTP: ${newestOtp}`);
+              return { id: newestFinal.id || JSON.stringify(newestFinal), otp: newestOtp, message: newestFinal };
             }
           }
+          
+          return { id: msgId, otp, message: msg };
         }
-        if (!timeText) {
-          const m = text.match(/\b\d+\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)\s*ago\b/i);
-          if (m) timeText = m[0];
-        }
-        out.push({ text: text.trim(), timeText });
-      }
-      return out;
-    });
-
-    const now = Date.now();
-    const parsed = rawCandidates.map((c) => ({ text: c.text, timeText: c.timeText, ts: c.timeText ? parseRelativeAgoToTimestamp(c.timeText) : null }));
-    const withOtp = parsed.map((p) => ({ ...p, otp: extract6DigitOtpFromText(p.text) })).filter((p) => p.otp);
-
-    // Filter to only SMS from target phone number (14806855617)
-    const fromTargetNumber = withOtp.filter((p) => {
-      return p.text.includes(targetPhoneNumber);
-    });
-
-    if (fromTargetNumber.length > 0) {
-      // Filter to only SMS that show "seconds ago" (very recent)
-      const recentSMS = fromTargetNumber.filter((p) => {
-        const timeTextLower = (p.timeText || '').toLowerCase();
-        const isRecentSeconds = timeTextLower.match(/\d+\s*(second|sec)s?\s*ago/i);
-        if (!isRecentSeconds) return false;
-        
-        // Also check the seconds count - only accept if <= 120 seconds
-        const secondsMatch = timeTextLower.match(/(\d+)\s*(second|sec)/i);
-        if (secondsMatch) {
-          const secondsAgo = parseInt(secondsMatch[1], 10);
-          return secondsAgo <= 120;
-        }
-        return true; // If we can't parse, accept it if it says "seconds ago"
-      });
-      
-      if (recentSMS.length > 0) {
-        // Sort by timestamp: OLDEST first (first one sent is usually the valid one)
-        // When multiple SMS are sent, the first one is what the server expects
-        const candidates = recentSMS.map((p) => ({ ...p, effTs: p.ts ?? now }));
-        candidates.sort((a: any, b: any) => a.effTs - b.effTs); // OLDEST first (changed from newest)
-        const oldest = candidates[0];
-        
-        if (recentSMS.length > 1) {
-          console.log(` Found ${recentSMS.length} SMS from ${targetPhoneNumber} showing "seconds ago". Using the OLDEST one (first sent) to avoid invalid codes.`);
-        }
-        
-        const timeTextLower = (oldest.timeText || '').toLowerCase();
-        const secondsMatch = timeTextLower.match(/(\d+)\s*(second|sec)/i);
-        const secondsAgo = secondsMatch ? parseInt(secondsMatch[1], 10) : null;
-        
-        console.log(`Using SMS from ${targetPhoneNumber} (${secondsAgo ? secondsAgo + ' seconds ago' : 'recent'}): otp=${oldest.otp}`);
-        return oldest.otp!;
       } else {
-        // Found SMS from target number but none show "seconds ago"
-        const newest = fromTargetNumber[0];
-        const timeTextLower = (newest.timeText || '').toLowerCase();
-        if (timeTextLower.match(/(minute|min|hour|hr|day|week|month|year)/i)) {
-          console.log(` Found SMS from ${targetPhoneNumber} but it's too old (${newest.timeText}), refreshing for SMS with "seconds ago"...`);
-        } else {
-          console.log(` Found SMS from ${targetPhoneNumber} but none show "seconds ago", refreshing...`);
-        }
+        // Log if we found a message but no OTP
+        const fromNumber = msg.from || msg.sender || msg.phoneNumber || msg.number || 'unknown';
+        const messageText = msg.text || msg.body || msg.message || msg.content || '';
+        console.log(`⚠️ Found message from ${fromNumber} but no OTP: "${messageText.substring(0, 50)}..."`);
       }
-    } else if (withOtp.length > 0) {
-      console.log(`Found ${withOtp.length} SMS OTP(s) but none from ${targetPhoneNumber}, refreshing...`);
-    } else {
-      console.log('No SMS OTP found yet (checked inbox rows), refreshing...');
     }
-
+    
+    // Update latest timestamp seen if we found messages
+    if (filteredMessages.length > 0) {
+      const latestMsg = filteredMessages[0];
+      const latestTs = getMessageTimestamp(latestMsg);
+      if (latestTs && (!latestTimestampSeen || latestTs > latestTimestampSeen)) {
+        latestTimestampSeen = latestTs;
+        latestMessageSeen = latestMsg;
+        console.log(`📊 Latest message timestamp seen: ${latestTs} (${new Date(latestTs).toISOString()})`);
+      }
+      
+      console.log(`Found ${filteredMessages.length} message(s) from sender, continuing to check for newer ones...`);
+    } else {
+      console.log(`No messages from ${smsClient.senderPhoneNumber} yet, continuing...`);
+    }
+    
     await delay(SMS_POLL_INTERVAL_MS);
-    await page.reload({ waitUntil: 'domcontentloaded' });
   }
-
-  throw new Error('Timeout waiting for SMS OTP on ReceiveSMS inbox');
+  
+  // If we have a latest message seen but didn't return, try to return it
+  if (latestMessageSeen) {
+    const otp = latestMessageSeen.code || extract6DigitOtpFromText(latestMessageSeen.text || latestMessageSeen.body || latestMessageSeen.message || latestMessageSeen.content || '');
+    if (otp) {
+      console.log(`⚠️ Timeout reached, using latest message found. OTP: ${otp}`);
+      return { id: latestMessageSeen.id || JSON.stringify(latestMessageSeen), otp, message: latestMessageSeen };
+    }
+  }
+  
+  throw new Error(`No new 2FA SMS from ${smsClient.senderPhoneNumber} arrived within timeout period.`);
 }
 
 /* -------------------- Robust click helper -------------------- */
@@ -261,13 +537,13 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
   test.setTimeout(6 * 60 * 1000); // 6 minutes overall
 
   const appPage = await context.newPage();
-  const smsPage = await context.newPage();
 
   const DOC_EMAIL = process.env.DOC_EMAIL;
   const DOC_PASSWORD = process.env.DOC_PASSWORD;
   const MAILTM_EMAIL = process.env.MAILTM_EMAIL;
   const MAILTM_PASSWORD = process.env.MAILTM_PASSWORD;
-  const RECEIVE_SMS_URL = process.env.RECEIVE_SMS_URL || 'https://www.receivesms.co/us-phone-number/21157/';
+  const RECEIVE_SMS_URL = process.env.RECEIVE_SMS_URL || 'https://www.receivesms.co/us-phone-number/21314/';
+  const SENDER_PHONE_NUMBER = process.env.SENDER_PHONE_NUMBER || '13345649589';
 
   if (!DOC_EMAIL || !DOC_PASSWORD || !MAILTM_EMAIL || !MAILTM_PASSWORD) {
     const missing = [];
@@ -280,6 +556,10 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
 
   const mailClient = new MailTmClient();
   await mailClient.login(MAILTM_EMAIL!, MAILTM_PASSWORD!);
+
+  console.log(`📱 Using SMS URL: ${RECEIVE_SMS_URL}`);
+  console.log(`📱 Looking for messages from: ${SENDER_PHONE_NUMBER}`);
+  const smsClient = new ReceiveSmsApiClient(RECEIVE_SMS_URL, SENDER_PHONE_NUMBER);
 
   // -------- EMAIL FLOW --------
   async function loginUsingEmailFlow() {
@@ -389,6 +669,10 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
       }
     }
 
+    // Get inbox BEFORE clicking Send - similar to email flow
+    const inboxBefore = await smsClient.getMessages();
+    const lastSmsId = inboxBefore[0]?.id || inboxBefore[0]?.messageId || inboxBefore[0]?._id;
+
     // If there's a button to send OTP (try several) - but only if OTP input is not already visible
     const otpAlreadySent = await appPage.locator('#auth-password').isVisible().catch(() => false);
     if (!otpAlreadySent) {
@@ -400,21 +684,18 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
       // Click Send button
       await tryClickAny(appPage, ['button:has-text("Send")', 'button:has-text("Send OTP")', 'button:has-text("Continue")', '.mdc-button__label']);
       
-      // Wait a few seconds for the SMS to be sent and arrive (to avoid getting old duplicate SMS)
-      console.log('Waiting 5 seconds for SMS to be sent and arrive...');
-      await delay(5000);
-      
-      const otp = await waitForOtpSms(smsPage, RECEIVE_SMS_URL, startAfter, SAFE_TIMEOUT_MS);
-      console.log('SMS OTP found =', otp);
+      // Wait for NEW SMS (similar to email flow)
+      const newSms = await waitForNewSms(smsClient, lastSmsId, startAfter);
+      console.log(`SMS OTP found = ${newSms.otp}`);
 
-      await appPage.fill('#auth-password', otp);
+      await appPage.fill('#auth-password', newSms.otp);
       await appPage.press('#auth-password', 'Enter');
     } else {
       console.log('OTP already sent, proceeding to fetch SMS...');
-      const otp = await waitForOtpSms(smsPage, RECEIVE_SMS_URL, null, SAFE_TIMEOUT_MS);
-      console.log('SMS OTP found =', otp);
+      const newSms = await waitForNewSms(smsClient, lastSmsId, null);
+      console.log(`SMS OTP found = ${newSms.otp}`);
       
-      await appPage.fill('#auth-password', otp);
+      await appPage.fill('#auth-password', newSms.otp);
       await appPage.press('#auth-password', 'Enter');
     }
 
@@ -560,14 +841,12 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
     await loginUsingPhoneFlow();
     await logoutFromProfile();
 
-    console.log('🎉 Both flows completed successfully');
+    console.log('Both flows completed successfully');
   } catch (err) {
     console.error('Test failed:', err);
     try { await appPage.screenshot({ path: 'failure-app.png' }); } catch {}
-    try { await smsPage.screenshot({ path: 'failure-sms.png' }); } catch {}
     throw err;
   } finally {
     try { await appPage.close(); } catch {}
-    try { await smsPage.close(); } catch {}
   }
 });
