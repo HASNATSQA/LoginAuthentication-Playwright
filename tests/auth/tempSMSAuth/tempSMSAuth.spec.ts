@@ -6,52 +6,7 @@ dotenv.config();
 
 /* -------------------- Config -------------------- */
 const SAFE_TIMEOUT_MS = 90_000; // max wait for OTPs
-const EMAIL_POLL_INTERVAL_MS = 2000;
 const SMS_POLL_INTERVAL_MS = 2500;
-
-/* -------------------- Mail.tm client -------------------- */
-class MailTmClient {
-  private token = '';
-  private accountId = '';
-  private baseUrl = 'https://api.mail.tm';
-
-  async login(email: string, password: string) {
-    try {
-      const res = await axios.post(`${this.baseUrl}/token`, { address: email, password });
-      this.token = res.data.token;
-      this.accountId = res.data.id;
-    } catch (error: any) {
-      if (error.response?.status === 401) {
-        throw new Error(
-          `Mail.tm authentication failed (401 Unauthorized). Please check your MAILTM_EMAIL and MAILTM_PASSWORD in .env file. ` +
-          `Email used: ${email ? email.substring(0, 10) + '...' : 'undefined'}. ` +
-          `Make sure the Mail.tm account exists and credentials are correct.`
-        );
-      }
-      throw error;
-    }
-  }
-
-  async getMessages() {
-    const res = await axios.get(`${this.baseUrl}/messages`, {
-      headers: { Authorization: `Bearer ${this.token}` },
-    });
-    return res.data['hydra:member'] || [];
-  }
-
-  async getMessageBody(id: string) {
-    const res = await axios.get(`${this.baseUrl}/messages/${id}`, {
-      headers: { Authorization: `Bearer ${this.token}` },
-    });
-    return res.data.text || res.data.intro || '';
-  }
-
-  async getMessageBodyText(id: string) {
-    // Alias for compatibility
-    return this.getMessageBody(id);
-  }
-
-}
 
 /* -------------------- SMS API client (receivesms.co) -------------------- */
 class ReceiveSmsApiClient {
@@ -318,26 +273,6 @@ function getMessageTimestamp(msg: any): number | null {
   return null;
 }
 
-/* -------------------- Email wait & extraction -------------------- */
-async function waitForNewEmail(mailClient: MailTmClient, previousEmailId?: string) {
-  console.log('⏳ Waiting for new 2FA email...');
-  
-  // Exactly like working script: try 10 times with 3 second intervals (30 seconds total)
-  for (let i = 0; i < 10; i++) {
-    const inbox = await mailClient.getMessages();
-    const latest = inbox[0];
-    
-    if (latest && latest.id !== previousEmailId) {
-      console.log(' New 2FA email received!');
-      return latest;
-    }
-    
-    await new Promise(res => setTimeout(res, 3000));
-  }
-  
-  throw new Error('No new 2FA email arrived within 30 seconds.');
-}
-
 /* -------------------- SMS wait & extraction (API-based) -------------------- */
 async function waitForNewSms(smsClient: ReceiveSmsApiClient, previousSmsId?: string, startAfter: number | null = null) {
   console.log(`⏳ Waiting for new 2FA SMS from ${smsClient.senderPhoneNumber}...`);
@@ -573,79 +508,119 @@ async function tryClickAny(page: Page, selectors: string[]) {
   return false;
 }
 
+/* -------------------- Authentication Method Helper -------------------- */
+async function ensureSMSSelected(page: Page) {
+  console.log('🔍 Checking if SMS is already selected...');
+  
+  // Wait for 2FA dropdown/page to load
+  await page.waitForTimeout(1200);
+  
+  // Check if OTP input field is already visible (meaning OTP was already sent)
+  const otpInputVisible = await page.locator('#auth-password').isVisible().catch(() => false);
+  if (otpInputVisible) {
+    console.log('✅ OTP input already visible - SMS was already selected and OTP sent');
+    return true;
+  }
+  
+  // Try to check current selection by looking at the combobox value
+  let isSMSSelected = false;
+  try {
+    // Try to get the current selected value
+    const combobox = page.getByRole('combobox', { name: /Authentication Method/i });
+    const selectedText = await combobox.textContent().catch(() => null);
+    
+    if (selectedText && (selectedText.includes('SMS') || selectedText.includes('Phone'))) {
+      isSMSSelected = true;
+      console.log('✅ SMS is already selected in dropdown');
+    } else if (selectedText && selectedText.includes('Email')) {
+      console.log('⚠️ Email is currently selected, switching to SMS...');
+      isSMSSelected = false;
+    }
+  } catch (e) {
+    // If we can't determine, assume we need to select SMS
+    console.log('⚠️ Could not determine current selection, will ensure SMS is selected...');
+    isSMSSelected = false;
+  }
+  
+  // If SMS is not selected, switch to SMS
+  if (!isSMSSelected) {
+    console.log('🔄 Switching to SMS option...');
+    
+    try {
+      // Open dropdown using codegen selector - try different names
+      console.log('   → Opening dropdown...');
+      try {
+        await page.getByRole('combobox', { name: /Authentication Method/i }).locator('svg').click();
+      } catch {
+        // Try with exact name if regex doesn't work
+        await page.getByRole('combobox', { name: 'Authentication Method Email' }).locator('svg').click();
+      }
+      console.log('   ✅ Dropdown opened');
+      await page.waitForTimeout(500);
+      
+      // Select SMS option using codegen selector
+      console.log('   → Selecting SMS option...');
+      await page.getByRole('option', { name: 'SMS' }).click();
+      console.log('   ✅ Selected SMS option');
+      await page.waitForTimeout(500);
+    } catch (e) {
+      console.warn('   ⚠️ Codegen selector failed, trying fallback...');
+      // Fallback to old selectors
+      const dropdownOpened = await tryClickAny(page, [
+        'mat-select',
+        'select',
+        '[role="combobox"]',
+        '.mat-mdc-select',
+        '.mat-select'
+      ]);
+      
+      if (dropdownOpened) {
+        await page.waitForTimeout(500);
+      }
+      
+      const phoneOptionClicked = await tryClickAny(page, [
+        '#mat-option-0',
+        'mat-option:has-text("Phone")',
+        'mat-option:has-text("SMS")',
+        '[role="option"]:has-text("SMS")',
+        'text=SMS'
+      ]);
+      
+      if (!phoneOptionClicked) {
+        throw new Error('Failed to select Phone/SMS option from dropdown - cannot proceed');
+      }
+      await page.waitForTimeout(500);
+    }
+  }
+  
+  return true;
+}
+
 /* -------------------- The Test -------------------- */
-test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
+test('DoctorNow login: SMS 2FA (robust)', async ({ context }) => {
   test.setTimeout(6 * 60 * 1000); // 6 minutes overall
 
   const appPage = await context.newPage();
 
   const DOC_EMAIL = process.env.DOC_EMAIL;
   const DOC_PASSWORD = process.env.DOC_PASSWORD;
-  const MAILTM_EMAIL = process.env.MAILTM_EMAIL;
-  const MAILTM_PASSWORD = process.env.MAILTM_PASSWORD;
   const RECEIVE_SMS_URL = process.env.RECEIVE_SMS_URL || 'https://www.receivesms.co/us-phone-number/21314/';
   const SENDER_PHONE_NUMBER = process.env.SENDER_PHONE_NUMBER || '13345649589';
 
-  if (!DOC_EMAIL || !DOC_PASSWORD || !MAILTM_EMAIL || !MAILTM_PASSWORD) {
+  if (!DOC_EMAIL || !DOC_PASSWORD) {
     const missing = [];
     if (!DOC_EMAIL) missing.push('DOC_EMAIL');
     if (!DOC_PASSWORD) missing.push('DOC_PASSWORD');
-    if (!MAILTM_EMAIL) missing.push('MAILTM_EMAIL');
-    if (!MAILTM_PASSWORD) missing.push('MAILTM_PASSWORD');
     throw new Error(`Missing required environment variables in .env file: ${missing.join(', ')}`);
   }
-
-  const mailClient = new MailTmClient();
-  await mailClient.login(MAILTM_EMAIL!, MAILTM_PASSWORD!);
 
   console.log(`📱 Using SMS URL: ${RECEIVE_SMS_URL}`);
   console.log(`📱 Looking for messages from: ${SENDER_PHONE_NUMBER}`);
   const smsClient = new ReceiveSmsApiClient(RECEIVE_SMS_URL, SENDER_PHONE_NUMBER);
 
-  // -------- EMAIL FLOW --------
-  async function loginUsingEmailFlow() {
-    console.log('--- EMAIL FLOW START ---');
-
-    await appPage.goto('https://dev-app.doctornow.io/login', { waitUntil: 'domcontentloaded' });
-
-    await appPage.fill('#user-email', DOC_EMAIL!);
-    await appPage.fill('#user-password', DOC_PASSWORD!);
-
-    // Get inbox BEFORE clicking login - exactly like working script
-    const inboxBefore = await mailClient.getMessages();
-    const lastEmailId = inboxBefore[0]?.id;
-
-    // Click login button - exactly like working script
-    await appPage.click('.mdc-button__label');
-
-    // Wait for NEW email (exactly like working script)
-    const newEmail = await waitForNewEmail(mailClient, lastEmailId);
-
-    // Extract OTP from the new email (exactly like working script)
-    const emailBody = await mailClient.getMessageBody(newEmail.id);
-    const otpMatch = emailBody.match(/\b\d{6}\b/);
-    const otpCode = otpMatch ? otpMatch[0] : null;
-
-    if (!otpCode) {
-      throw new Error('Could not find OTP in the email!');
-    }
-    
-    console.log(`Found OTP: ${otpCode}`);
-
-    await appPage.fill('#auth-password', otpCode);
-    await appPage.press('#auth-password', 'Enter');
-
-    console.log('Waiting 7 seconds for page to fully load after 2FA entry...');
-    await delay(7000); // Wait 7 seconds as page takes time to load
-    
-    // Wait for profile menu to be available
-    await appPage.waitForSelector('.mat-mdc-menu-trigger.profile_pic, .mat-mdc-menu-trigger, .mat-mdc-button-touch-target', { timeout: 10000 });
-    console.log('Logged in using Email 2FA - Profile menu is now available');
-  }
-
-  // -------- PHONE FLOW --------
-  async function loginUsingPhoneFlow() {
-    console.log('--- PHONE FLOW START ---');
+  // -------- SMS FLOW --------
+  async function loginUsingSMSFlow() {
+    console.log('--- SMS FLOW START ---');
     await appPage.goto('https://dev-app.doctornow.io/login', { waitUntil: 'domcontentloaded' });
 
     await appPage.fill('#user-email', DOC_EMAIL!);
@@ -654,61 +629,8 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
     const clicked = await tryClickAny(appPage, ['.mdc-button__label', 'button[type="submit"]', 'button:has-text("Login")']);
     if (!clicked) await appPage.press('#user-password', 'Enter');
 
-    // Wait for 2FA dropdown/page to load
-    await appPage.waitForTimeout(1200);
-
-    // Check if OTP input field is already visible (meaning OTP was already sent)
-    const otpInputVisible = await appPage.locator('#auth-password').isVisible().catch(() => false);
-    if (otpInputVisible) {
-      console.log('OTP input already visible - proceeding directly to fetch SMS...');
-    } else {
-      // Always explicitly select Phone/SMS to ensure Email is not selected
-      console.log(' Ensuring Phone/SMS option is selected from dropdown...');
-      
-      try {
-        // Open dropdown using codegen selector - try different names
-        console.log('   → Opening dropdown...');
-        try {
-          await appPage.getByRole('combobox', { name: /Authentication Method/i }).locator('svg').click();
-        } catch {
-          // Try with exact name if regex doesn't work
-          await appPage.getByRole('combobox', { name: 'Authentication Method Email' }).locator('svg').click();
-        }
-        console.log('   Dropdown opened');
-        await appPage.waitForTimeout(500);
-        
-        // Select SMS option using codegen selector
-        console.log('   → Selecting SMS option...');
-        await appPage.getByRole('option', { name: 'SMS' }).click();
-        console.log('   Selected SMS option');
-      } catch (e) {
-        console.warn('   Codegen selector failed, trying fallback...');
-        // Fallback to old selectors
-        const dropdownOpened = await tryClickAny(appPage, [
-          'mat-select',
-          'select',
-          '[role="combobox"]',
-          '.mat-mdc-select',
-          '.mat-select'
-        ]);
-        
-        if (dropdownOpened) {
-          await appPage.waitForTimeout(500);
-        }
-        
-        const phoneOptionClicked = await tryClickAny(appPage, [
-          '#mat-option-0',
-          'mat-option:has-text("Phone")',
-          'mat-option:has-text("SMS")',
-          '[role="option"]:has-text("SMS")',
-          'text=SMS'
-        ]);
-        
-        if (!phoneOptionClicked) {
-          throw new Error('Failed to select Phone/SMS option from dropdown - cannot proceed');
-        }
-      }
-    }
+    // Always ensure SMS is selected
+    await ensureSMSSelected(appPage);
 
     // Get inbox BEFORE clicking Send - similar to email flow
     const inboxBefore = await smsClient.getMessages();
@@ -741,11 +663,11 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
     }
 
     console.log('Waiting 10 seconds for page to fully load after 2FA entry...');
-    await delay(10000); // Wait 15 seconds as page takes time to load
+    await delay(10000); // Wait 10 seconds as page takes time to load
     
     // Wait for profile menu to be available
     await appPage.waitForSelector('.mat-mdc-menu-trigger.profile_pic, .mat-mdc-menu-trigger, .mat-mdc-button-touch-target', { timeout: 10000 });
-    console.log('Logged in using Phone 2FA - Profile menu is now available');
+    console.log('✅ Logged in using SMS 2FA - Profile menu is now available');
   }
 
   // -------- Logout helper --------
@@ -876,13 +798,10 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
 
   // -------- Run sequence --------
   try {
-    await loginUsingEmailFlow();
+    await loginUsingSMSFlow();
     await logoutFromProfile();
 
-    await loginUsingPhoneFlow();
-    await logoutFromProfile();
-
-    console.log('Both flows completed successfully');
+    console.log('SMS flow completed successfully');
   } catch (err) {
     console.error('Test failed:', err);
     try { await appPage.screenshot({ path: 'failure-app.png' }); } catch {}
@@ -891,3 +810,4 @@ test('DoctorNow login: Email then Phone 2FA (robust)', async ({ context }) => {
     try { await appPage.close(); } catch {}
   }
 });
+
