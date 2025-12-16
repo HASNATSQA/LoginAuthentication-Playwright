@@ -270,7 +270,38 @@ export async function loginWithEmail2FA(options: EmailAuthOptions): Promise<void
   console.log(`Waiting ${waitAfterLogin}ms for page to fully load after 2FA entry...`);
   await delay(waitAfterLogin);
   
-  // Wait for profile menu to be available
-  await page.waitForSelector('.mat-mdc-menu-trigger.profile_pic, .mat-mdc-menu-trigger, .mat-mdc-button-touch-target', { timeout: 10000 });
+  // Wait for page to fully load after 2FA
+  await page.waitForLoadState('networkidle');
+  
+  // Wait for profile menu to be available using modern Playwright API
+  // Try multiple selectors with fallback strategy
+  let profileMenuFound = false;
+  const selectors = [
+    'span:nth-of-type(5)',
+    '.mat-mdc-menu-trigger.profile_pic',
+    '.mat-mdc-menu-trigger',
+    '.mat-mdc-button-touch-target',
+    'button:has-text("Welcome")'
+  ];
+  
+  for (const selector of selectors) {
+    try {
+      const locator = selector.includes('nth-of-type') 
+        ? page.locator('span').nth(5)
+        : page.locator(selector).first();
+      await locator.waitFor({ state: 'visible', timeout: 10000 });
+      profileMenuFound = true;
+      console.log(`✅ Profile menu found using selector: ${selector}`);
+      break;
+    } catch {
+      // Try next selector
+      continue;
+    }
+  }
+  
+  if (!profileMenuFound) {
+    throw new Error('Profile menu not found after login - authentication may have failed');
+  }
+  
   console.log('✅ Logged in using Email 2FA - Profile menu is now available');
 }

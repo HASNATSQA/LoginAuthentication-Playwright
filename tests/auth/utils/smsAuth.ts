@@ -521,3 +521,7 @@ export async function loginWithSMS2FA(options: SMSAuthOptions): Promise<void> {
   await page.waitForSelector('.mat-mdc-menu-trigger.profile_pic, .mat-mdc-menu-trigger, .mat-mdc-button-touch-target', { timeout: 10000 });
   console.log('✅ Logged in using SMS 2FA - Profile menu is now available');
 }
+
+
+
+
